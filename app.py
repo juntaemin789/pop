@@ -46,65 +46,141 @@ from report_utils import (
 st.set_page_config(
     page_title="OGQ 스티커 닥터",
     page_icon="🩺",
-    layout="centered",
+    layout="wide",
 )
 
 
 st.markdown(
     """
     <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
+
     :root {
-        --mint-primary: #0F9B8E;
-        --mint-light: #EEFBF9;
-        --mint-border: #BFEFE9;
+        --ogq-green: #00c73c;
+        --ogq-green-dark: #00a832;
+        --ogq-green-soft: #effbf3;
+        --ogq-border: #e8e8e8;
+        --ogq-text: #222222;
+        --ogq-muted: #777777;
+        --ogq-bg: #f7f7f7;
+        --ogq-red: #ff4d4f;
+        --ogq-orange: #ff8a00;
     }
-    div[data-testid="stExpander"] {
-        border: 1px solid var(--mint-border);
-        border-radius: 14px;
-        box-shadow: 0 2px 10px rgba(15, 155, 142, 0.08);
-        overflow: hidden;
+
+    html, body, [class*="css"] {
+        font-family: 'Noto Sans KR', sans-serif;
     }
-    div[data-testid="stExpander"] summary { font-weight: 600; }
-    button[kind="secondary"], button[kind="primary"] {
-        border-radius: 999px !important;
-        font-weight: 600 !important;
+    .stApp { background: var(--ogq-bg); color: var(--ogq-text); }
+    [data-testid="stHeader"] { background: rgba(255,255,255,.96); }
+    [data-testid="stAppViewContainer"] > .main { background: var(--ogq-bg); }
+    [data-testid="stMainBlockContainer"] { max-width: 1240px; padding-top: 1rem; padding-bottom: 4rem; }
+
+    /* OGQ-like global header */
+    .ogq-header {
+        background: #fff;
+        border-bottom: 1px solid var(--ogq-border);
+        margin: -1rem -2rem 1.25rem;
+        padding: 0 2rem;
+        position: relative;
     }
-    div[data-testid="stFileUploaderDropzone"] {
-        border-radius: 14px;
-        border: 1.5px dashed var(--mint-border);
-        background-color: var(--mint-light);
+    .ogq-header-inner {
+        max-width: 1240px;
+        margin: 0 auto;
+        min-height: 76px;
+        display: flex; align-items: center; gap: 28px;
     }
+    .ogq-logo { display:flex; align-items:center; gap:10px; font-weight:800; font-size:20px; color:#111; white-space:nowrap; }
+    .ogq-logo-mark { width:32px; height:32px; border-radius:10px; background:var(--ogq-green); color:#fff; display:grid; place-items:center; font-size:17px; }
+    .ogq-nav { display:flex; gap:22px; align-items:center; color:#444; font-size:14px; font-weight:600; }
+    .ogq-nav span:first-child { color:#111; }
+    .ogq-nav .active { color:var(--ogq-green-dark); }
+    .ogq-header-badge { margin-left:auto; color:#666; font-size:12px; border:1px solid #eee; border-radius:999px; padding:7px 12px; background:#fff; }
+
+    /* Login / hero */
     .hero-banner {
-        background: linear-gradient(135deg, #0F9B8E 0%, #14B8A6 100%);
-        border-radius: 18px;
-        padding: 28px 32px;
-        color: white;
-        margin-bottom: 28px;
+        background:#fff; border:1px solid var(--ogq-border); border-radius:18px;
+        padding:30px 34px; color:var(--ogq-text); margin:0 0 22px;
+        box-shadow:0 2px 10px rgba(0,0,0,.03);
     }
-    .hero-banner h1 { margin: 0 0 6px 0; font-size: 1.6rem; }
-    .hero-banner p { margin: 0; opacity: 0.92; font-size: 0.95rem; }
-    .score-card {
-        background: var(--mint-light);
-        border: 1px solid var(--mint-border);
-        border-radius: 16px;
-        padding: 18px 22px;
-        margin-bottom: 20px;
+    .hero-banner .eyebrow { color:var(--ogq-green-dark); font-size:12px; font-weight:800; letter-spacing:.04em; margin-bottom:8px; }
+    .hero-banner h1 { margin:0 0 8px; font-size:30px; letter-spacing:-.04em; }
+    .hero-banner p { margin:0; color:#666; font-size:14px; line-height:1.65; }
+    .hero-action { margin-top:18px; display:flex; gap:8px; flex-wrap:wrap; }
+    .hero-chip { display:inline-block; padding:8px 12px; border-radius:999px; background:#f5f5f5; color:#555; font-size:12px; font-weight:600; }
+
+    /* Main tabs */
+    div[data-testid="stTabs"] { background:#fff; border:1px solid var(--ogq-border); border-radius:16px; padding:7px 12px 0; box-shadow:0 2px 10px rgba(0,0,0,.025); }
+    div[data-testid="stTabs"] [role="tablist"] { gap:6px; border-bottom:1px solid #eee; }
+    div[data-testid="stTabs"] button[role="tab"] { color:#777; font-weight:700; border-radius:10px 10px 0 0; padding:13px 18px; }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] { color:#111; }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] { background:var(--ogq-green) !important; height:3px; }
+
+    /* Sections */
+    h1, h2, h3 { letter-spacing:-.035em; }
+    h2 { font-size:22px !important; margin-top:26px !important; }
+    h3 { font-size:18px !important; }
+    [data-testid="stMarkdownContainer"] p { line-height:1.65; }
+    .section-kicker { font-size:12px; color:var(--ogq-green-dark); font-weight:800; margin-bottom:4px; }
+    .section-note { color:#777; font-size:13px; }
+
+    /* Inputs / cards */
+    div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div { border-radius:10px !important; border-color:#ddd !important; background:#fff !important; }
+    div[data-testid="stFileUploaderDropzone"] { border:1px dashed #cfcfcf; border-radius:14px; background:#fff; padding:24px; }
+    div[data-testid="stFileUploaderDropzone"]:hover { border-color:var(--ogq-green); background:var(--ogq-green-soft); }
+    button[kind="primary"] { background:var(--ogq-green) !important; border-color:var(--ogq-green) !important; color:#fff !important; border-radius:9px !important; font-weight:700 !important; }
+    button[kind="primary"]:hover { background:var(--ogq-green-dark) !important; border-color:var(--ogq-green-dark) !important; }
+    button[kind="secondary"] { border-radius:9px !important; font-weight:600 !important; }
+    div[data-testid="stExpander"] { border:1px solid var(--ogq-border); border-radius:12px; background:#fff; box-shadow:none; overflow:hidden; }
+    div[data-testid="stExpander"] summary { font-weight:700; }
+    [data-testid="stMetric"] { background:#fff; border:1px solid var(--ogq-border); border-radius:12px; padding:16px; }
+    [data-testid="stMetricValue"] { color:#111; }
+
+    /* Market cards */
+    .market-card { background:#fff; border:1px solid var(--ogq-border); border-radius:14px; overflow:hidden; height:100%; box-shadow:0 2px 8px rgba(0,0,0,.025); }
+    .market-card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:#f5f5f5; }
+    .market-card-body { padding:12px 14px 15px; }
+    .market-card-title { font-size:14px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .market-card-creator { margin-top:5px; color:#888; font-size:12px; }
+    .market-card-tag { display:inline-block; margin-top:9px; color:#00a832; background:#effbf3; padding:4px 7px; border-radius:5px; font-size:10px; font-weight:700; }
+
+    .score-card { background:#fff; border:1px solid var(--ogq-border); border-radius:14px; padding:18px 22px; margin-bottom:20px; }
+    .score-card .score-num { font-size:2.2rem; font-weight:800; color:var(--ogq-green-dark); }
+    .todo-row { border-left:4px solid var(--ogq-green); background:#fff; border-top:1px solid #eee; border-right:1px solid #eee; border-bottom:1px solid #eee; border-radius:8px; padding:9px 12px; margin-bottom:8px; }
+    .todo-row.fail { border-left-color:var(--ogq-red); }
+    .todo-row.warn { border-left-color:var(--ogq-orange); }
+    .status-card { padding:14px 16px; border:1px solid var(--ogq-border); background:#fff; border-radius:12px; }
+    .divider { height:1px; background:#eee; margin:26px 0; }
+
+    /* Sidebar: keep functional but visually quiet */
+    [data-testid="stSidebar"] { background:#fff; border-right:1px solid var(--ogq-border); }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 { font-size:16px !important; }
+
+    @media (max-width: 800px) {
+        .ogq-header { margin-left:-1rem; margin-right:-1rem; padding:0 1rem; }
+        .ogq-header-inner { min-height:62px; gap:14px; }
+        .ogq-nav { display:none; }
+        .ogq-header-badge { font-size:11px; }
+        .hero-banner { padding:24px 20px; }
+        .hero-banner h1 { font-size:25px; }
+        div[data-testid="stTabs"] button[role="tab"] { padding:11px 10px; font-size:12px; }
     }
-    .score-card .score-num {
-        font-size: 2.2rem;
-        font-weight: 800;
-        color: var(--mint-primary);
-    }
-    .todo-row {
-        border-left: 4px solid var(--mint-primary);
-        background: white;
-        border-radius: 8px;
-        padding: 8px 12px;
-        margin-bottom: 8px;
-    }
-    .todo-row.fail { border-left-color: #B3261E; }
-    .todo-row.warn { border-left-color: #8A6300; }
     </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+st.markdown(
+    """
+    <div class="ogq-header">
+      <div class="ogq-header-inner">
+        <div class="ogq-logo"><span class="ogq-logo-mark">✦</span> OGQ Sticker Doctor</div>
+        <div class="ogq-nav">
+          <span>홈</span><span class="active">콘텐츠 검사</span><span>시장 비교</span><span>히스토리</span><span>리뷰</span>
+        </div>
+        <div class="ogq-header-badge">AI 콘텐츠 진단 도구</div>
+      </div>
+    </div>
     """,
     unsafe_allow_html=True,
 )
@@ -171,14 +247,20 @@ if not current_user:
 st.markdown(
     """
     <div class="hero-banner">
-        <h1>🩺 OGQ 스티커 닥터</h1>
-        <p>내 스티커의 문제를 찾고, OGQ 시장의 기존 콘텐츠와 비교해 수정 방향을 잡아보세요.</p>
+        <div class="eyebrow">CREATOR TOOL · STICKER CHECK</div>
+        <h1>스티커를 업로드하기 전에, 한 번 더 꼼꼼하게</h1>
+        <p>이미지 규격 검사부터 AI 진단, OGQ 시장 비교, 개선 우선순위와 리포트까지 한 화면에서 확인하세요.</p>
+        <div class="hero-action">
+          <span class="hero-chip">✓ 규격 자동 검사</span>
+          <span class="hero-chip">✦ AI 문제 위치 표시</span>
+          <span class="hero-chip">⌕ 시장 콘텐츠 비교</span>
+        </div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-st.caption(f"현재 로그인: {current_user}")
+st.caption(f"로그인 계정 · {current_user}")
 
 def _draw_annotations(file_bytes: bytes, findings: list[dict]) -> Image.Image:
     """Gemini 공식 bbox 형식 [ymin, xmin, ymax, xmax]을 실제 이미지 좌표로 변환한다."""
@@ -785,7 +867,7 @@ def _run_ai_diagnostics(
     return had_success
 
 
-tab_check, tab_history, tab_reviews = st.tabs(["🩺 검사하기", "📚 히스토리", "💬 리뷰"])
+tab_check, tab_history, tab_reviews = st.tabs(["검사하기", "내 히스토리", "리뷰"])
 
 with tab_history:
     _render_history_center(current_user)
@@ -795,6 +877,7 @@ with tab_reviews:
 
 with tab_check:
     # ---------- 0단계: 검사 기준 ----------
+    st.markdown('<div class="section-kicker">STEP 0 · CHECK PROFILE</div>', unsafe_allow_html=True)
     st.header("검사 기준 설정")
     st.caption("OGQ 공개 가이드를 기본으로 불러오고, 원하는 검사 항목만 선택하거나 나만의 기준을 원하는 만큼 추가할 수 있어요.")
 
@@ -861,7 +944,8 @@ with tab_check:
     st.caption("파일 해상도·용량·형식 같은 기술 규격 검사는 기본으로 유지되고, 위에서 선택한 영역은 AI 심층 진단에 적용됩니다.")
 
     # ---------- 1단계: 이미지 + 사용자 설명 ----------
-    st.header("1단계 · 스티커 정보 입력")
+    st.markdown('<div class="section-kicker">STEP 1 · CONTENT INFO</div>', unsafe_allow_html=True)
+    st.header("스티커 정보 입력")
     feelings = st.text_input(
         "이 스티커는 어떤 느낌인가요?",
         placeholder="예: 귀여움, 장난스러움, 직장인 공감, 살짝 시니컬함",
@@ -872,7 +956,8 @@ with tab_check:
     )
     user_tags = [t.strip().lstrip("#") for t in tag_text.split(",") if t.strip()]
 
-    st.header("2단계 · 스티커 업로드")
+    st.markdown('<div class="section-kicker">STEP 2 · UPLOAD</div>', unsafe_allow_html=True)
+    st.header("스티커 업로드")
     st.caption("OGQ 공개 제작 가이드 기준: 메인 240x240 · 스티커 740x640 · 탭 96x74, 각 1MB 이하, RGB, 투명 배경")
 
     files = st.file_uploader(
@@ -921,7 +1006,8 @@ with tab_check:
 
         # ---------- 3단계: 시장 비교 ----------
         st.divider()
-        st.header("3단계 · OGQ 시장 비교")
+        st.markdown('<div class="section-kicker">STEP 3 · MARKET RESEARCH</div>', unsafe_allow_html=True)
+        st.header("OGQ 시장 비교")
         st.caption("입력한 느낌과 태그를 키워드로 OGQ 마켓의 관련 스티커를 찾고, AI가 공통점·차이점·장단점을 분석합니다.")
 
         auto_diagnose_after_market = st.checkbox(
@@ -1180,7 +1266,8 @@ with tab_check:
 
         # ---------- 4단계: AI 진단 + 위치 표시 ----------
         st.divider()
-        st.header("4단계 · AI가 어디가 문제인지 표시")
+        st.markdown('<div class="section-kicker">STEP 4 · AI DIAGNOSIS</div>', unsafe_allow_html=True)
+        st.header("AI 문제 위치 표시")
         st.caption("선택한 검사 영역과 시장 비교 자료를 바탕으로 문제 영역을 표시하고, 무엇을/왜/어떻게 고칠지 설명합니다.")
 
         market_context = st.session_state.get("market_context", "")
@@ -1271,7 +1358,8 @@ with tab_check:
 
         # ---------- 5단계: 기존 셀프 체크리스트 ----------
         st.divider()
-        st.header("5단계 · 규정 위반 셀프 체크리스트")
+        st.markdown('<div class="section-kicker">STEP 5 · SELF CHECK</div>', unsafe_allow_html=True)
+        st.header("규정 위반 셀프 체크리스트")
         st.caption("이미지만으로 확정하기 어려운 항목은 직접 확인해 주세요.")
 
         checklist_items = {
@@ -1291,7 +1379,8 @@ with tab_check:
 
         # ---------- 6단계: 점수 + Todo ----------
         st.divider()
-        st.header("6단계 · 준비도 & 개선 우선순위")
+        st.markdown('<div class="section-kicker">STEP 6 · PRIORITY</div>', unsafe_allow_html=True)
+        st.header("준비도 & 개선 우선순위")
         score = compute_score(
             all_file_results,
             checklist_done,
@@ -1329,7 +1418,8 @@ with tab_check:
 
         # ---------- 7단계: PDF + 히스토리 ----------
         st.divider()
-        st.header("7단계 · 리포트 내보내기 & 재검사 히스토리")
+        st.markdown('<div class="section-kicker">STEP 7 · REPORT</div>', unsafe_allow_html=True)
+        st.header("리포트 내보내기 & 재검사 히스토리")
         col_a, col_b = st.columns(2)
         with col_a:
             if st.button("📄 PDF 리포트 생성"):

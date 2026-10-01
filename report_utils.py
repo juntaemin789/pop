@@ -19,12 +19,28 @@ from reportlab.pdfbase.ttfonts import TTFont
 # CID 폰트(HYGothic-Medium 등)는 폰트를 PDF에 "임베드"하지 않고 뷰어에 이미 깔려있는
 # 한글 폰트팩을 빌려쓰는 방식이라 그 폰트팩이 없는 환경(대부분의 뷰어)에서는 텍스트가 아예 안 보인다.
 # 그래서 실제 한글 트루타입 폰트 파일을 프로젝트에 포함시켜 PDF 안에 통째로 임베드한다.
+# Streamlit Cloud/로컬 실행 환경에 따라 현재 작업 디렉터리가 달라질 수 있으므로
+# 폰트 경로는 반드시 이 파일(report_utils.py)을 기준으로 찾는다.
 _FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_FONT_BODY_PATH = os.path.join(_FONT_DIR, "NanumGothic-Regular.ttf")
+_FONT_HEADING_PATH = os.path.join(_FONT_DIR, "NanumGothic-Bold.ttf")
+
 FONT_BODY = "NanumGothic"
 FONT_HEADING = "NanumGothic-Bold"
 
-pdfmetrics.registerFont(TTFont(FONT_BODY, os.path.join(_FONT_DIR, "NanumGothic-Regular.ttf")))
-pdfmetrics.registerFont(TTFont(FONT_HEADING, os.path.join(_FONT_DIR, "NanumGothic-Bold.ttf")))
+# 배포 저장소에서 폰트 바이너리가 빠졌거나 손상되어도 앱 전체가
+# import 단계에서 중단되지 않도록 한글 CID 폰트를 fallback으로 사용한다.
+# NanumGothic 파일이 정상적으로 있으면 PDF에 TTF를 임베드한다.
+try:
+    if not (os.path.isfile(_FONT_BODY_PATH) and os.path.isfile(_FONT_HEADING_PATH)):
+        raise FileNotFoundError("NanumGothic TTF 파일이 없습니다.")
+    pdfmetrics.registerFont(TTFont(FONT_BODY, _FONT_BODY_PATH))
+    pdfmetrics.registerFont(TTFont(FONT_HEADING, _FONT_HEADING_PATH))
+except (OSError, IOError, ValueError):
+    # 외부 TTF가 없는 Streamlit Cloud 환경에서도 앱이 시작되도록 한다.
+    # CID 폰트는 별도 파일이 필요하지 않지만 PDF 뷰어의 한글 폰트 지원에 의존한다.
+    FONT_BODY = "HYSMyeongJo-Medium"
+    FONT_HEADING = "HYSMyeongJo-Medium"
 
 HISTORY_PATH = "diagnosis_history.json"
 
