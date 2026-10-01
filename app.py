@@ -1,0 +1,1495 @@
+# app.py — OGQ 스티커 닥터
+# 기존 VER2 기능 유지 + OGQ 시장 비교 + 심사 기준 커스텀 + AI 문제 위치 표시
+# 시장 비교 AI가 실패해도 앱 전체가 중단되지 않도록 별도 오류 처리와 모델 fallback을 사용한다.
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import io
+import json
+import time
+
+import streamlit as st
+import streamlit.components.v1 as components
+from PIL import Image, ImageDraw
+
+from checker import SPECS, check_image
+from diagnosis import diagnose_detailed, render_diagnosis_markdown
+from criteria import DEFAULT_CRITERIA, PLATFORM_PRESETS, build_selected_criteria
+from market_analysis import (
+    MARKET_SCHEMA,
+    build_market_analysis_prompt,
+    build_market_context_for_diagnosis,
+    download_market_reference_images,
+    normalize_market_analysis,
+    generate_public_web_check,
+)
+from ogq_market import OGQAPIError, search_by_keywords
+from user_store import (
+    create_user,
+    load_user_diagnosis_history,
+    save_diagnosis_record,
+    verify_user,
+    save_review,
+    load_reviews_for_record,
+    load_public_reviews,
+    load_all_reviews,
+)
+from report_utils import (
+    build_pdf_report,
+    build_priority_todo,
+    compute_score,
+)
+
+
+st.set_page_config(
+    page_title="OGQ 스티커 닥터",
+    page_icon="🩺",
+    layout="wide",
+)
+
+
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
+
+    :root {
+        --ogq-green: #00c73c;
+        --ogq-green-dark: #00a832;
+        --ogq-green-soft: #effbf3;
+        --ogq-border: #e8e8e8;
+        --ogq-text: #222222;
+        --ogq-muted: #777777;
+        --ogq-bg: #f7f7f7;
+        --ogq-red: #ff4d4f;
+        --ogq-orange: #ff8a00;
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Noto Sans KR', sans-serif;
+    }
+    .stApp { background: var(--ogq-bg); color: var(--ogq-text); }
+    [data-testid="stHeader"] { background: rgba(255,255,255,.96); }
+    [data-testid="stAppViewContainer"] > .main { background: var(--ogq-bg); }
+    [data-testid="stMainBlockContainer"] { max-width: 1240px; padding-top: 1rem; padding-bottom: 4rem; }
+
+    /* OGQ-like global header */
+    .ogq-header {
+        background: #fff;
+        border-bottom: 1px solid var(--ogq-border);
+        margin: -1rem -2rem 1.25rem;
+        padding: 0 2rem;
+        position: relative;
+    }
+    .ogq-header-inner {
+        max-width: 1240px;
+        margin: 0 auto;
+        min-height: 76px;
+        display: flex; align-items: center; gap: 28px;
+    }
+    .ogq-logo { display:flex; align-items:center; gap:10px; font-weight:800; font-size:20px; color:#111; white-space:nowrap; }
+    .ogq-logo-mark { width:32px; height:32px; border-radius:10px; background:var(--ogq-green); color:#fff; display:grid; place-items:center; font-size:17px; }
+    .ogq-nav { display:flex; gap:22px; align-items:center; color:#444; font-size:14px; font-weight:600; }
+    .ogq-nav span:first-child { color:#111; }
+    .ogq-nav .active { color:var(--ogq-green-dark); }
+    .ogq-header-badge { margin-left:auto; color:#666; font-size:12px; border:1px solid #eee; border-radius:999px; padding:7px 12px; background:#fff; }
+
+    /* Login / hero */
+    .hero-banner {
+        background:#fff; border:1px solid var(--ogq-border); border-radius:18px;
+        padding:30px 34px; color:var(--ogq-text); margin:0 0 22px;
+        box-shadow:0 2px 10px rgba(0,0,0,.03);
+    }
+    .hero-banner .eyebrow { color:var(--ogq-green-dark); font-size:12px; font-weight:800; letter-spacing:.04em; margin-bottom:8px; }
+    .hero-banner h1 { margin:0 0 8px; font-size:30px; letter-spacing:-.04em; }
+    .hero-banner p { margin:0; color:#666; font-size:14px; line-height:1.65; }
+    .hero-action { margin-top:18px; display:flex; gap:8px; flex-wrap:wrap; }
+    .hero-chip { display:inline-block; padding:8px 12px; border-radius:999px; background:#f5f5f5; color:#555; font-size:12px; font-weight:600; }
+
+    /* Main tabs */
+    div[data-testid="stTabs"] { background:#fff; border:1px solid var(--ogq-border); border-radius:16px; padding:7px 12px 0; box-shadow:0 2px 10px rgba(0,0,0,.025); }
+    div[data-testid="stTabs"] [role="tablist"] { gap:6px; border-bottom:1px solid #eee; }
+    div[data-testid="stTabs"] button[role="tab"] { color:#777; font-weight:700; border-radius:10px 10px 0 0; padding:13px 18px; }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] { color:#111; }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] { background:var(--ogq-green) !important; height:3px; }
+
+    /* Sections */
+    h1, h2, h3 { letter-spacing:-.035em; }
+    h2 { font-size:22px !important; margin-top:26px !important; }
+    h3 { font-size:18px !important; }
+    [data-testid="stMarkdownContainer"] p { line-height:1.65; }
+    .section-kicker { font-size:12px; color:var(--ogq-green-dark); font-weight:800; margin-bottom:4px; }
+    .section-note { color:#777; font-size:13px; }
+
+    /* Inputs / cards */
+    div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div { border-radius:10px !important; border-color:#ddd !important; background:#fff !important; }
+    div[data-testid="stFileUploaderDropzone"] { border:1px dashed #cfcfcf; border-radius:14px; background:#fff; padding:24px; }
+    div[data-testid="stFileUploaderDropzone"]:hover { border-color:var(--ogq-green); background:var(--ogq-green-soft); }
+    button[kind="primary"] { background:var(--ogq-green) !important; border-color:var(--ogq-green) !important; color:#fff !important; border-radius:9px !important; font-weight:700 !important; }
+    button[kind="primary"]:hover { background:var(--ogq-green-dark) !important; border-color:var(--ogq-green-dark) !important; }
+    button[kind="secondary"] { border-radius:9px !important; font-weight:600 !important; }
+    div[data-testid="stExpander"] { border:1px solid var(--ogq-border); border-radius:12px; background:#fff; box-shadow:none; overflow:hidden; }
+    div[data-testid="stExpander"] summary { font-weight:700; }
+    [data-testid="stMetric"] { background:#fff; border:1px solid var(--ogq-border); border-radius:12px; padding:16px; }
+    [data-testid="stMetricValue"] { color:#111; }
+
+    /* Market cards */
+    .market-card { background:#fff; border:1px solid var(--ogq-border); border-radius:14px; overflow:hidden; height:100%; box-shadow:0 2px 8px rgba(0,0,0,.025); }
+    .market-card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:#f5f5f5; }
+    .market-card-body { padding:12px 14px 15px; }
+    .market-card-title { font-size:14px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .market-card-creator { margin-top:5px; color:#888; font-size:12px; }
+    .market-card-tag { display:inline-block; margin-top:9px; color:#00a832; background:#effbf3; padding:4px 7px; border-radius:5px; font-size:10px; font-weight:700; }
+
+    .score-card { background:#fff; border:1px solid var(--ogq-border); border-radius:14px; padding:18px 22px; margin-bottom:20px; }
+    .score-card .score-num { font-size:2.2rem; font-weight:800; color:var(--ogq-green-dark); }
+    .todo-row { border-left:4px solid var(--ogq-green); background:#fff; border-top:1px solid #eee; border-right:1px solid #eee; border-bottom:1px solid #eee; border-radius:8px; padding:9px 12px; margin-bottom:8px; }
+    .todo-row.fail { border-left-color:var(--ogq-red); }
+    .todo-row.warn { border-left-color:var(--ogq-orange); }
+    .status-card { padding:14px 16px; border:1px solid var(--ogq-border); background:#fff; border-radius:12px; }
+    .divider { height:1px; background:#eee; margin:26px 0; }
+
+    /* Sidebar: keep functional but visually quiet */
+    [data-testid="stSidebar"] { background:#fff; border-right:1px solid var(--ogq-border); }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h3 { font-size:16px !important; }
+
+    @media (max-width: 800px) {
+        .ogq-header { margin-left:-1rem; margin-right:-1rem; padding:0 1rem; }
+        .ogq-header-inner { min-height:62px; gap:14px; }
+        .ogq-nav { display:none; }
+        .ogq-header-badge { font-size:11px; }
+        .hero-banner { padding:24px 20px; }
+        .hero-banner h1 { font-size:25px; }
+        div[data-testid="stTabs"] button[role="tab"] { padding:11px 10px; font-size:12px; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+st.markdown(
+    """
+    <div class="ogq-header">
+      <div class="ogq-header-inner">
+        <div class="ogq-logo"><span class="ogq-logo-mark">✦</span> OGQ Sticker Doctor</div>
+        <div class="ogq-nav">
+          <span>홈</span><span class="active">콘텐츠 검사</span><span>시장 비교</span><span>히스토리</span><span>리뷰</span>
+        </div>
+        <div class="ogq-header-badge">AI 콘텐츠 진단 도구</div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+def _render_auth_gate() -> str | None:
+    """프로토타입 로그인/회원가입 화면."""
+    if st.session_state.get("auth_user"):
+        with st.sidebar:
+            st.markdown("### 👤 로그인 상태")
+            st.success(f"{st.session_state['auth_user']}님")
+            if st.button("로그아웃"):
+                st.session_state.pop("auth_user", None)
+                st.rerun()
+        return st.session_state["auth_user"]
+
+    st.markdown(
+        """
+        <div class="hero-banner">
+            <h1>🩺 OGQ 스티커 닥터</h1>
+            <p>로그인하면 내 진단 결과를 사용자별로 저장하고 재검사 기록을 확인할 수 있어요.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    tab_login, tab_signup = st.tabs(["로그인", "회원가입"])
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("아이디", key="login_username")
+            password = st.text_input("비밀번호", type="password", key="login_password")
+            submitted = st.form_submit_button("로그인", type="primary")
+        if submitted:
+            if verify_user(username, password):
+                st.session_state["auth_user"] = username.strip()
+                st.rerun()
+            else:
+                st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    with tab_signup:
+        with st.form("signup_form"):
+            username = st.text_input("새 아이디", key="signup_username")
+            password = st.text_input("새 비밀번호", type="password", key="signup_password")
+            password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm")
+            submitted = st.form_submit_button("회원가입")
+        if submitted:
+            if password != password_confirm:
+                st.error("비밀번호 확인이 일치하지 않습니다.")
+            else:
+                ok, message = create_user(username, password)
+                if ok:
+                    st.success(message + " 이제 로그인해 주세요.")
+                else:
+                    st.error(message)
+
+    st.caption("현재 버전은 계정/기록 기능의 MVP입니다. 실제 서비스 배포 전에는 외부 인증/영구 DB로 이전하는 것을 권장합니다.")
+    return None
+
+
+current_user = _render_auth_gate()
+if not current_user:
+    st.stop()
+
+st.markdown(
+    """
+    <div class="hero-banner">
+        <div class="eyebrow">CREATOR TOOL · STICKER CHECK</div>
+        <h1>스티커를 업로드하기 전에, 한 번 더 꼼꼼하게</h1>
+        <p>이미지 규격 검사부터 AI 진단, OGQ 시장 비교, 개선 우선순위와 리포트까지 한 화면에서 확인하세요.</p>
+        <div class="hero-action">
+          <span class="hero-chip">✓ 규격 자동 검사</span>
+          <span class="hero-chip">✦ AI 문제 위치 표시</span>
+          <span class="hero-chip">⌕ 시장 콘텐츠 비교</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.caption(f"로그인 계정 · {current_user}")
+
+def _draw_annotations(file_bytes: bytes, findings: list[dict]) -> Image.Image:
+    """Gemini 공식 bbox 형식 [ymin, xmin, ymax, xmax]을 실제 이미지 좌표로 변환한다."""
+    import io
+
+    image = Image.open(io.BytesIO(file_bytes)).convert("RGBA")
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+
+    for idx, finding in enumerate(findings, 1):
+        bbox = finding.get("bbox", [])
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            continue
+
+        try:
+            ymin, xmin, ymax, xmax = [max(0, min(1000, float(v))) for v in bbox]
+        except (TypeError, ValueError):
+            continue
+        if xmax <= xmin or ymax <= ymin:
+            continue
+
+        # Gemini 공식 형식: [ymin, xmin, ymax, xmax]
+        left = int(xmin / 1000 * width)
+        top = int(ymin / 1000 * height)
+        right = int(xmax / 1000 * width)
+        bottom = int(ymax / 1000 * height)
+
+        if right <= left or bottom <= top:
+            continue
+
+        # 지나치게 큰 영역은 표시하지 않는다. (모델이 전체 화면을 잘못 지정한 경우)
+        area_ratio = ((right - left) * (bottom - top)) / max(1, width * height)
+        if area_ratio > 0.90:
+            continue
+
+        line_width = max(3, min(width, height) // 85)
+        draw.ellipse(
+            (left, top, right, bottom),
+            outline="#D92D20",
+            width=line_width,
+        )
+        badge_left = max(0, left)
+        badge_top = max(0, top - 28)
+        draw.rounded_rectangle(
+            (badge_left, badge_top, badge_left + 26, badge_top + 24),
+            radius=8,
+            fill="#D92D20",
+        )
+        draw.text(
+            (badge_left + 8, badge_top + 4),
+            str(idx),
+            fill="#FFFFFF",
+        )
+
+    return image
+
+
+def _speak_completion(message: str = "") -> None:
+    """진단 완료 시 브라우저에서 짧은 2음 벨소리(띠링)를 재생한다.
+
+    기존 음성 합성(TTS)은 사용하지 않는다. 브라우저의 자동재생 정책에 의해
+    소리가 차단될 경우를 대비해 수동 재생 버튼을 함께 제공한다.
+    """
+    components.html(
+        """
+        <div style="font-family:sans-serif; padding:2px 0;">
+          <button id="ding-btn" style="border:1px solid #BFEFE9;border-radius:999px;padding:7px 14px;background:#EEFBF9;color:#0B3B36;font-weight:600;cursor:pointer;">🔔 완료음 다시 듣기</button>
+        </div>
+        <script>
+        (() => {
+          let played = false;
+
+          function ding() {
+            try {
+              const AudioContext = window.AudioContext || window.webkitAudioContext;
+              if (!AudioContext) return;
+
+              const ctx = new AudioContext();
+              const now = ctx.currentTime;
+
+              const gain = ctx.createGain();
+              gain.gain.setValueAtTime(0.0001, now);
+              gain.gain.exponentialRampToValueAtTime(0.42, now + 0.015);
+              gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+              gain.connect(ctx.destination);
+
+              const osc1 = ctx.createOscillator();
+              osc1.type = 'sine';
+              osc1.frequency.setValueAtTime(880, now);
+              osc1.frequency.exponentialRampToValueAtTime(1320, now + 0.10);
+              osc1.connect(gain);
+
+              const osc2 = ctx.createOscillator();
+              osc2.type = 'sine';
+              osc2.frequency.setValueAtTime(1320, now + 0.12);
+              osc2.frequency.exponentialRampToValueAtTime(1760, now + 0.22);
+              osc2.connect(gain);
+
+              osc1.start(now);
+              osc1.stop(now + 0.11);
+              osc2.start(now + 0.12);
+              osc2.stop(now + 0.28);
+
+              setTimeout(() => { try { ctx.close(); } catch (_) {} }, 650);
+              played = true;
+            } catch (_) {
+              // 브라우저 자동재생/AudioContext 제한 시 수동 버튼으로 재생 가능
+            }
+          }
+
+          const btn = document.getElementById('ding-btn');
+          btn?.addEventListener('click', ding);
+          setTimeout(() => { if (!played) ding(); }, 100);
+        })();
+        </script>
+        """,
+        height=45,
+    )
+
+
+def _get_secret(name: str, default: str = "") -> str:
+    """Streamlit Secrets에서 문자열 값을 안전하게 읽는다."""
+    try:
+        value = st.secrets.get(name, default)
+    except Exception:
+        value = default
+    return str(value or "").strip()
+
+
+def _is_developer(username: str) -> bool:
+    """Streamlit Secrets의 DEVELOPER_USERNAMES에 등록된 계정인지 확인한다."""
+    raw = _get_secret("DEVELOPER_USERNAMES")
+    allowed = {item.strip() for item in raw.split(",") if item.strip()}
+    return username.strip() in allowed
+
+
+def _history_image_b64(file_bytes: bytes, findings: list[dict] | None = None, max_side: int = 420) -> str:
+    """히스토리에서 다시 볼 수 있도록 문제 표시 이미지의 작은 PNG를 저장한다."""
+    try:
+        image = _draw_annotations(file_bytes, findings or [])
+        image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        image.save(buf, format="PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def _safe_market_results_for_history(results: list[dict]) -> list[dict]:
+    cleaned: list[dict] = []
+    for item in results[:8]:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {
+                "content_id": item.get("content_id") or item.get("asset_id") or item.get("assetId") or "",
+                "title": item.get("title", ""),
+                "description": item.get("description", ""),
+                "main_image_url": item.get("main_image_url") or item.get("thumbnail_url") or item.get("thumbnailUrl") or "",
+                "creator_name": item.get("creator_name") or item.get("creator", {}).get("nickname", "") if isinstance(item.get("creator"), dict) else item.get("creator_name", ""),
+                "published_at": item.get("published_at") or item.get("publishedAt") or "",
+                "tags": list(item.get("tags") or [])[:10],
+                "matched_keyword": item.get("matched_keyword", ""),
+                "visual_match_score": item.get("visual_match_score", 0),
+                "visual_match_hint": item.get("visual_match_hint", ""),
+            }
+        )
+    return cleaned
+
+
+def _build_history_payload(
+    all_file_results: list[dict],
+    selected_criteria: list[str],
+    custom_rules: list[str],
+    feelings: str,
+    user_tags: list[str],
+) -> dict:
+    files_payload: dict[str, dict] = {}
+    for file_result in all_file_results:
+        digest = hashlib.sha256(file_result["bytes"]).hexdigest()[:16]
+        cache_prefix = f"diag_v5_{file_result['name']}_{digest}_"
+        matched_keys = [
+            key for key in st.session_state.keys()
+            if isinstance(key, str) and key.startswith(cache_prefix)
+        ]
+        diagnosis = st.session_state[matched_keys[-1]] if matched_keys else {}
+        findings = diagnosis.get("findings", []) if isinstance(diagnosis, dict) else []
+        files_payload[file_result["name"]] = {
+            "img_type": file_result.get("img_type"),
+            "results": file_result.get("results", []),
+            "diagnosis": diagnosis,
+            "annotated_image_b64": _history_image_b64(file_result["bytes"], findings),
+        }
+
+    return {
+        "history_version": 2,
+        "feelings": feelings,
+        "user_tags": user_tags,
+        "selected_criteria": selected_criteria,
+        "custom_rules": custom_rules,
+        "market_analysis": st.session_state.get("market_analysis", {}),
+        "market_results": _safe_market_results_for_history(st.session_state.get("market_results", [])),
+        "public_web_check": st.session_state.get("public_web_check", {}),
+        "files": files_payload,
+        "market_auto_diagnose": bool(st.session_state.get("auto_diagnose_after_market", False)),
+    }
+
+
+def _render_review_for_history(current_user: str, record: dict, developer_mode: bool = False) -> None:
+    """선택한 히스토리에 대한 사용자 리뷰를 입력하고 기존 리뷰를 보여준다."""
+    st.subheader("📝 이 진단에 대한 리뷰")
+    st.caption("리뷰는 다음 AI 피드백을 개선하기 위한 데이터로 활용할 수 있습니다. 한 진단당 한 번 작성하며, 다시 제출하면 수정됩니다.")
+
+    existing = load_reviews_for_record(record["id"], include_developer_only=True)
+    own = next((r for r in existing if r.get("username") == current_user), None)
+
+    with st.form(f"review_form_{record['id']}"):
+        overall = st.slider("전체 만족도", 1, 5, int(own["overall_rating"]) if own else 4)
+        usefulness = st.slider("도움이 된 정도", 1, 5, int(own["usefulness_rating"]) if own else 4)
+        accuracy = st.slider("진단 정확도", 1, 5, int(own["accuracy_rating"]) if own else 4)
+        issue_tags = st.multiselect(
+            "아쉬웠던 부분 (여러 개 선택 가능)",
+            [
+                "문제 위치가 부정확함",
+                "시장 비교가 부정확함",
+                "비슷한 콘텐츠 판단이 아쉬움",
+                "설명이 너무 일반적임",
+                "수정 방법이 구체적이지 않음",
+                "오탈자/텍스트 인식이 부정확함",
+                "결과가 너무 길거나 복잡함",
+                "특별한 아쉬움 없음",
+            ],
+            default=(own.get("issue_tags", []) if own else []),
+        )
+        comment = st.text_area(
+            "추가 의견",
+            value=(own.get("comment", "") if own else ""),
+            placeholder="예: 시장의 유사 스티커는 잘 찾았지만, 왜 비슷한지 설명이 조금 더 구체적이면 좋겠습니다.",
+        )
+        visibility_label = st.radio(
+            "리뷰 공개 범위",
+            ["모두 공개", "개발자만 보기"],
+            index=0 if not own or own.get("visibility") == "public" else 1,
+            horizontal=True,
+            help="모두 공개: 다른 사용자도 볼 수 있습니다. 개발자만 보기: 개발자 계정만 볼 수 있습니다.",
+        )
+        submitted = st.form_submit_button("리뷰 저장", type="primary")
+
+    if submitted:
+        review_id = save_review(
+            current_user,
+            record["id"],
+            overall_rating=overall,
+            usefulness_rating=usefulness,
+            accuracy_rating=accuracy,
+            issue_tags=issue_tags,
+            comment=comment,
+            visibility="public" if visibility_label == "모두 공개" else "developer",
+        )
+        if review_id:
+            st.success("리뷰가 저장됐어요. 다음 진단을 개선하는 데 활용할 수 있습니다.")
+            st.rerun()
+        else:
+            st.error("리뷰 저장에 실패했습니다.")
+
+    if existing:
+        st.markdown("**이 진단에 남겨진 리뷰**")
+        visible_reviews = existing if developer_mode else [r for r in existing if r.get("visibility") == "public" or r.get("username") == current_user]
+        for review in visible_reviews:
+            visibility_text = "모두 공개" if review.get("visibility") == "public" else "개발자만"
+            st.markdown(
+                f"**{review.get('username', '사용자')}** · {'⭐' * int(review.get('overall_rating', 0))} · {visibility_text} · {review.get('timestamp', '')}"
+            )
+            st.caption(
+                f"도움 {review.get('usefulness_rating', 0)}/5 · 정확도 {review.get('accuracy_rating', 0)}/5"
+            )
+            if review.get("issue_tags"):
+                st.caption(" · ".join(review["issue_tags"]))
+            if review.get("comment"):
+                st.write(review["comment"])
+
+
+def _render_history_detail(current_user: str, record: dict, developer_mode: bool = False) -> None:
+    payload = record.get("diagnosis") or {}
+    st.markdown(
+        f"### 검사 #{record['id']} · {record['timestamp']} · {record['score']:.0f}점" if record.get("score") is not None else f"### 검사 #{record['id']} · {record['timestamp']}"
+    )
+    st.caption(
+        f"파일 {record['file_count']}개 · PASS {record['pass']} · WARN {record['warn']} · FAIL {record['fail']} · 체크리스트 {record['checklist']}"
+    )
+    if record.get("market_keywords"):
+        st.write("시장 검색어: " + ", ".join(record["market_keywords"]))
+
+    if payload.get("feelings"):
+        st.write("느낌/분위기: " + payload["feelings"])
+    if payload.get("user_tags"):
+        st.write("사용자 태그: " + ", ".join(f"#{t}" for t in payload["user_tags"]))
+
+    with st.expander("적용된 검사 기준", expanded=False):
+        selected = payload.get("selected_criteria") or []
+        custom = payload.get("custom_rules") or []
+        st.success(f"기본/공개 기준 {max(0, len(selected) - len(custom))}개 + 나만의 기준 {len(custom)}개 적용")
+        for criterion in selected:
+            st.write("✓ " + criterion)
+
+    market = payload.get("market_analysis") or {}
+    if market:
+        st.markdown("### 📊 AI 시장 비교 결과")
+        level = market.get("similarity_level", "보통")
+        st.write(f"시장 유사성: **{level}**")
+        if market.get("similarity_summary"):
+            st.write(market["similarity_summary"])
+        if market.get("differences"):
+            st.markdown("**시장과의 차이점**")
+            for item in market["differences"]:
+                st.write("- " + item)
+        if market.get("gaps"):
+            st.markdown("**보완하면 좋은 점**")
+            for item in market["gaps"]:
+                st.write("- " + item)
+
+    history_files = payload.get("files") or {}
+    if history_files:
+        st.markdown("### 🔴 AI 문제 위치 기록")
+        for filename, item in history_files.items():
+            diagnosis = item.get("diagnosis") or {}
+            with st.expander(filename, expanded=False):
+                image_b64 = item.get("annotated_image_b64")
+                if image_b64:
+                    try:
+                        st.image(base64.b64decode(image_b64), caption="저장된 AI 문제 위치 표시", use_container_width=True)
+                    except Exception:
+                        pass
+                st.markdown(f"**한 줄 총평:** {diagnosis.get('summary', '기록 없음')}")
+                if diagnosis.get("detail"):
+                    st.write(diagnosis["detail"])
+                findings = diagnosis.get("findings") or []
+                for idx, finding in enumerate(findings, 1):
+                    st.markdown(
+                        f"**{idx}. {finding.get('area', '검토 항목')}** · {finding.get('severity', '')}"
+                    )
+                    st.write(f"- 어디가: {finding.get('what', '')}")
+                    st.write(f"- 왜: {finding.get('why', '')}")
+                    st.write(f"- 어떻게: {finding.get('how', '')}")
+                    if finding.get("market_basis"):
+                        st.caption("시장 근거: " + finding["market_basis"])
+                custom_results = diagnosis.get("custom_criteria_results") or []
+                if custom_results:
+                    st.markdown("**나만의 검사 기준 결과**")
+                    for result in custom_results:
+                        st.write(f"{result.get('status', '판단 어려움')} · {result.get('criterion', '')}: {result.get('result', '')}")
+
+    _render_review_for_history(current_user, record, developer_mode=developer_mode)
+
+
+def _render_history_center(current_user: str) -> None:
+    """로그인 사용자가 자신의 과거 진단 기록을 언제든지 확인할 수 있는 탭."""
+    history = load_user_diagnosis_history(current_user, limit=50)
+    st.header("📚 내 진단 히스토리")
+    st.caption("로그인한 계정의 과거 검사 결과를 언제든지 다시 볼 수 있어요.")
+
+    if not history:
+        st.info("아직 저장된 진단 히스토리가 없습니다. 검사를 저장하면 여기에 계속 남습니다.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("저장된 검사", len(history))
+    with col2:
+        st.metric("최근 점수", f"{history[-1]['score']:.0f}" if history[-1].get("score") is not None else "-")
+    with col3:
+        avg = sum(float(h.get("score") or 0) for h in history) / max(1, len(history))
+        st.metric("평균 점수", f"{avg:.0f}")
+
+    if len(history) >= 2:
+        st.line_chart({"score": [h["score"] for h in history]})
+
+    labels = {
+        h["id"]: f"검사 #{h['id']} · {h['timestamp']} · {h['score']:.0f}점 · 파일 {h['file_count']}개"
+        for h in reversed(history)
+    }
+    selected_id = st.selectbox(
+        "확인할 히스토리",
+        options=list(labels.keys()),
+        format_func=lambda value: labels[value],
+        key="history_selected_id",
+    )
+    selected_record = next(h for h in history if h["id"] == selected_id)
+    _render_history_detail(current_user, selected_record, developer_mode=_is_developer(current_user))
+
+
+def _render_review_center(current_user: str) -> None:
+    """공개 리뷰와 개발자 전용 리뷰를 별도 탭으로 보여준다."""
+    st.header("💬 리뷰")
+    st.caption("AI 진단 결과에 대한 사용자 의견을 모아서 다음 피드백 개선에 활용합니다.")
+
+    public_reviews = load_public_reviews(limit=20)
+    st.subheader("🌎 모두가 볼 수 있는 공개 리뷰")
+    if not public_reviews:
+        st.caption("아직 공개 리뷰가 없습니다.")
+    else:
+        for review in public_reviews:
+            st.markdown(
+                f"**{review.get('username', '사용자')}** · {'⭐' * int(review.get('overall_rating', 0))} · 검사 #{review.get('record_id')}"
+            )
+            st.caption(
+                f"도움 {review.get('usefulness_rating', 0)}/5 · 정확도 {review.get('accuracy_rating', 0)}/5 · {review.get('timestamp', '')}"
+            )
+            if review.get("issue_tags"):
+                st.caption(" · ".join(review["issue_tags"]))
+            if review.get("comment"):
+                st.write(review["comment"])
+            st.divider()
+
+    if _is_developer(current_user):
+        reviews = load_all_reviews(limit=100)
+        st.subheader("🛠 개발자 리뷰 대시보드")
+        if not reviews:
+            st.caption("아직 리뷰 데이터가 없습니다.")
+        else:
+            avg_overall = sum(r["overall_rating"] for r in reviews) / len(reviews)
+            avg_useful = sum(r["usefulness_rating"] for r in reviews) / len(reviews)
+            avg_acc = sum(r["accuracy_rating"] for r in reviews) / len(reviews)
+            a, b, c = st.columns(3)
+            a.metric("리뷰 수", len(reviews))
+            b.metric("평균 만족도", f"{avg_overall:.1f}/5")
+            c.metric("평균 정확도", f"{avg_acc:.1f}/5")
+            st.caption(f"평균 도움 정도: {avg_useful:.1f}/5 · 공개/개발자 전용 리뷰 모두 포함")
+            for review in reviews[:30]:
+                visibility = "공개" if review["visibility"] == "public" else "개발자 전용"
+                st.markdown(
+                    f"**검사 #{review['record_id']} · {review['username']} · {'⭐' * review['overall_rating']} · {visibility}**"
+                )
+                st.caption(
+                    f"도움 {review['usefulness_rating']}/5 · 정확도 {review['accuracy_rating']}/5 · {review['timestamp']}"
+                )
+                if review.get("issue_tags"):
+                    st.write("문제 태그: " + ", ".join(review["issue_tags"]))
+                if review.get("comment"):
+                    st.write(review["comment"])
+                st.divider()
+
+
+def _keywords_from_user_input(feelings: str, user_tags: list[str], limit: int = 5) -> list[str]:
+    """느낌/태그 입력을 OGQ 검색용 키워드로 정리하고 중복을 제거한다."""
+    raw_values: list[str] = []
+
+    for part in (feelings or "").replace("\n", ",").split(","):
+        value = " ".join(part.strip().split())
+        if value:
+            raw_values.append(value)
+
+    for tag in user_tags:
+        value = " ".join(str(tag or "").strip().lstrip("#").split())
+        if value:
+            raw_values.append(value)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in raw_values:
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+        if len(result) >= max(1, limit):
+            break
+
+    return result
+
+
+def _generate_market_ai(
+    gemini_key: str,
+    market_prompt: str,
+    user_image_bytes: bytes,
+    user_image_mime: str,
+    market_results: list[dict],
+    *,
+    max_output_tokens: int = 1700,
+) -> tuple[dict, str | None]:
+    """사용자 실제 이미지와 OGQ 참조 이미지를 함께 비교 분석한다."""
+    from google import genai
+    from google.genai import types
+    from google.genai.errors import APIError, ServerError
+    import json
+    import random
+    import time
+
+    client = genai.Client(api_key=gemini_key)
+    models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
+    refs = download_market_reference_images(market_results[:4])
+
+    visual_instruction = """
+[이미지 비교 규칙]
+- 첫 번째 첨부 이미지는 '사용자 스티커'입니다.
+- 이후 첨부 이미지는 각각 'OGQ 검색 결과 [번호]'의 실제 이미지입니다.
+- 사용자가 입력한 태그는 보조 정보일 뿐이며, 이미지 자체보다 우선하지 않습니다.
+- 사용자의 태그만 보고 시장과의 차이를 만들어내지 마세요.
+- 사용자 이미지와 시장 참조 이미지가 실제로 같은 스티커이거나 거의 동일하면 그 사실을 명확하게 인정하고 유사성을 매우 높음으로 평가하세요.
+- 검색 결과의 제목/태그가 서로 달라도 실제 이미지가 같다면 '다르다'고 쓰지 마세요.
+- differences는 실제 이미지 또는 제목/설명/태그 중 확인 가능한 근거가 있을 때만 작성하세요.
+- comparisons는 실제로 비교 가능한 결과만 최대 4개 작성하세요.
+"""
+    contents = [
+        market_prompt + "\n" + visual_instruction,
+        "[USER STICKER IMAGE]",
+        types.Part.from_bytes(data=user_image_bytes, mime_type=user_image_mime),
+    ]
+    for ref in refs:
+        contents.extend([
+            f"[OGQ SEARCH RESULT {ref['index']}] {ref['title']}",
+            types.Part.from_bytes(data=ref["bytes"], mime_type=ref["mime_type"]),
+        ])
+
+    last_error: Exception | None = None
+    for model_name in models:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=MARKET_SCHEMA,
+                        max_output_tokens=max_output_tokens,
+                        temperature=0.15,
+                    ),
+                )
+                raw = (response.text or "").strip()
+                if not raw:
+                    raise RuntimeError(f"{model_name}이 빈 응답을 반환했습니다.")
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    start_json = raw.find("{")
+                    end_json = raw.rfind("}")
+                    if start_json < 0 or end_json <= start_json:
+                        raise RuntimeError("시장 분석 결과가 JSON으로 반환되지 않았습니다.")
+                    parsed = json.loads(raw[start_json:end_json + 1])
+                return normalize_market_analysis(parsed), None
+            except (ServerError, APIError, RuntimeError, json.JSONDecodeError) as exc:
+                last_error = exc
+                code = getattr(exc, "code", None)
+                transient = isinstance(exc, ServerError) or code in {408, 429, 500, 502, 503, 504}
+                if transient and attempt < 1:
+                    time.sleep(min(6.0, 1.5 * (2 ** attempt)) + random.uniform(0, 0.4))
+                    continue
+                if not transient:
+                    break
+
+    return {}, (
+        "Gemini 시장 비교 분석에 실패했습니다. 검색된 OGQ 콘텐츠는 정상적으로 확인할 수 있습니다. "
+        f"({last_error})"
+    )
+
+
+def _run_ai_diagnostics(
+    all_file_results: list[dict],
+    selected_criteria: list[str],
+    custom_rules: list[str],
+    market_context: str,
+    gemini_key: str,
+) -> bool:
+    """전체 스티커 AI 진단을 실행한다. 성공/실패와 무관하게 UI가 계속 렌더링되도록 결과를 세션에 저장한다."""
+    progress = st.progress(0, text="AI가 스티커를 살펴보는 중...")
+    had_success = False
+    for i, file_result in enumerate(all_file_results):
+        digest = hashlib.sha256(file_result["bytes"]).hexdigest()[:16]
+        criteria_key = hashlib.md5(",".join(selected_criteria).encode("utf-8")).hexdigest()[:8]
+        market_key = hashlib.md5(market_context.encode("utf-8")).hexdigest()[:8]
+        cache_key = f"diag_v5_{file_result['name']}_{digest}_{criteria_key}_{market_key}"
+
+        if cache_key not in st.session_state:
+            try:
+                detailed = diagnose_detailed(
+                    file_result["bytes"],
+                    file_result["mime"],
+                    gemini_key,
+                    selected_criteria=selected_criteria,
+                    market_context=market_context,
+                    custom_criteria=custom_rules,
+                )
+                st.session_state[cache_key] = detailed
+                if detailed.get("model_used"):
+                    had_success = True
+            except Exception as exc:
+                st.session_state[cache_key] = {
+                    "summary": "이번 스티커의 AI 진단은 일시적으로 완료되지 않았습니다.",
+                    "detail": "Gemini 서버가 일시적으로 바쁘거나 요청을 처리하지 못했습니다. 자동 재시도와 대체 모델을 시도했지만 응답을 받지 못했습니다. 규격 검사 결과는 계속 확인할 수 있습니다.",
+                    "findings": [],
+                    "strengths": [],
+                    "market_note": "",
+                    "custom_criteria_results": [],
+                    "raw_text": "",
+                    "model_used": "",
+                    "diagnosis_error": str(exc),
+                }
+        else:
+            had_success = True
+
+        progress.progress((i + 1) / len(all_file_results), text=f"{i + 1}/{len(all_file_results)} 완료")
+
+    progress.empty()
+    return had_success
+
+
+tab_check, tab_history, tab_reviews = st.tabs(["검사하기", "내 히스토리", "리뷰"])
+
+with tab_history:
+    _render_history_center(current_user)
+
+with tab_reviews:
+    _render_review_center(current_user)
+
+with tab_check:
+    # ---------- 0단계: 검사 기준 ----------
+    st.markdown('<div class="section-kicker">STEP 0 · CHECK PROFILE</div>', unsafe_allow_html=True)
+    st.header("검사 기준 설정")
+    st.caption("OGQ 공개 가이드를 기본으로 불러오고, 원하는 검사 항목만 선택하거나 나만의 기준을 원하는 만큼 추가할 수 있어요.")
+
+    preset_names = list(PLATFORM_PRESETS.keys()) + ["내가 직접 선택"]
+    preset = st.selectbox("검사 기준 프로필", preset_names, index=0)
+
+    default_names = [name for name, _ in DEFAULT_CRITERIA]
+    if preset == "내가 직접 선택":
+        selected_default = default_names
+    else:
+        selected_default = PLATFORM_PRESETS.get(preset, default_names)
+
+    selected_criteria = st.multiselect(
+        "검사할 심사 영역",
+        options=default_names,
+        default=selected_default,
+    )
+
+    if "custom_rules" not in st.session_state:
+        st.session_state["custom_rules"] = []
+
+    st.markdown("**나만의 검사 기준**")
+    custom_rule_text = st.text_input(
+        "새 검사 기준",
+        key="custom_rule_input",
+        placeholder="예: 캐릭터 얼굴이 이미지의 30% 이상 보이는지 확인",
+    )
+    if st.button("＋ 검사 기준 추가"):
+        rule = " ".join(custom_rule_text.strip().split())
+        if not rule:
+            st.warning("추가할 검사 기준을 입력해주세요.")
+        elif rule in st.session_state["custom_rules"]:
+            st.info("이미 추가된 검사 기준입니다.")
+        else:
+            st.session_state["custom_rules"].append(rule)
+            st.success("검사 기준이 추가됐습니다. 다음 AI 진단에 적용됩니다.")
+
+    custom_rules = list(st.session_state["custom_rules"])
+    if custom_rules:
+        for idx, rule in enumerate(custom_rules):
+            c1, c2 = st.columns([8, 1])
+            with c1:
+                st.write(f"**{idx + 1}.** {rule}")
+            with c2:
+                if st.button("삭제", key=f"delete_custom_rule_{idx}"):
+                    st.session_state["custom_rules"].pop(idx)
+                    st.rerun()
+    else:
+        st.caption("아직 사용자 지정 기준이 없습니다. 원하는 만큼 추가할 수 있습니다.")
+
+    selected_criteria = build_selected_criteria("내가 직접 선택", selected_criteria, custom_rules)
+    standard_selected = [item for item in selected_criteria if item not in custom_rules]
+    with st.expander("이번 AI 진단에 적용되는 기준 확인", expanded=True):
+        st.success(f"적용됨 · 기본/공개 기준 {len(standard_selected)}개 + 나만의 기준 {len(custom_rules)}개")
+        if standard_selected:
+            st.markdown("**기본/공개 기준**")
+            for criterion in standard_selected:
+                st.write(f"✓ {criterion}")
+        if custom_rules:
+            st.markdown("**나만의 기준 — 개별 결과가 별도 표시됩니다**")
+            for rule in custom_rules:
+                st.write(f"✓ {rule}")
+
+    st.caption("파일 해상도·용량·형식 같은 기술 규격 검사는 기본으로 유지되고, 위에서 선택한 영역은 AI 심층 진단에 적용됩니다.")
+
+    # ---------- 1단계: 이미지 + 사용자 설명 ----------
+    st.markdown('<div class="section-kicker">STEP 1 · CONTENT INFO</div>', unsafe_allow_html=True)
+    st.header("스티커 정보 입력")
+    feelings = st.text_input(
+        "이 스티커는 어떤 느낌인가요?",
+        placeholder="예: 귀여움, 장난스러움, 직장인 공감, 살짝 시니컬함",
+    )
+    tag_text = st.text_input(
+        "태그를 입력해주세요",
+        placeholder="쉼표로 구분해서 입력: 강아지, 직장인, 출근, 피곤",
+    )
+    user_tags = [t.strip().lstrip("#") for t in tag_text.split(",") if t.strip()]
+
+    st.markdown('<div class="section-kicker">STEP 2 · UPLOAD</div>', unsafe_allow_html=True)
+    st.header("스티커 업로드")
+    st.caption("OGQ 공개 제작 가이드 기준: 메인 240x240 · 스티커 740x640 · 탭 96x74, 각 1MB 이하, RGB, 투명 배경")
+
+    files = st.file_uploader(
+        "스티커 이미지를 올려주세요 (여러 장 가능)",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+    )
+
+    if files:
+        type_counts = {name: 0 for name in SPECS}
+        all_file_results = []
+
+        for f in files:
+            file_bytes = f.getvalue()
+            img_type, results = check_image(file_bytes, f.name)
+            if img_type:
+                type_counts[img_type] += 1
+
+            all_file_results.append(
+                {
+                    "name": f.name,
+                    "bytes": file_bytes,
+                    "mime": f.type or "image/png",
+                    "img_type": img_type,
+                    "results": results,
+                }
+            )
+
+            fail_count = sum(1 for grade, _, _ in results if grade == "fail")
+            icon = "❌" if fail_count else "✅"
+            with st.expander(
+                f"{icon} {f.name} — 문제 {fail_count}건",
+                expanded=fail_count > 0,
+            ):
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.image(file_bytes)
+                with col2:
+                    for grade, item, msg in results:
+                        if grade == "pass":
+                            st.success(f"**{item}** — {msg}")
+                        elif grade == "warn":
+                            st.warning(f"**{item}** — {msg}")
+                        else:
+                            st.error(f"**{item}** — {msg}")
+
+        # ---------- 3단계: 시장 비교 ----------
+        st.divider()
+        st.markdown('<div class="section-kicker">STEP 3 · MARKET RESEARCH</div>', unsafe_allow_html=True)
+        st.header("OGQ 시장 비교")
+        st.caption("입력한 느낌과 태그를 키워드로 OGQ 마켓의 관련 스티커를 찾고, AI가 공통점·차이점·장단점을 분석합니다.")
+
+        auto_diagnose_after_market = st.checkbox(
+            "시장 비교가 끝나면 바로 AI 문제 표시까지 실행",
+            value=False,
+            key="auto_diagnose_after_market",
+            help="체크하면 시장 비교와 시장 분석이 끝난 직후 선택한 검사 기준으로 AI 진단을 자동 실행합니다.",
+        )
+
+        public_web_enabled = st.checkbox(
+            "Google 공개 웹 유사성 참고 조사도 실행",
+            value=False,
+            key="public_web_enabled",
+            help="OGQ 시장 분석과 별도로 공개 웹을 참고합니다. 추가 Gemini 요청이 발생하므로 필요할 때만 켜는 것을 권장합니다.",
+        )
+
+        if st.button("🔎 OGQ 시장과 비교하기", type="primary"):
+            # 이전 결과를 먼저 비워서 검색 실패 시 오래된 결과가 보이지 않도록 한다.
+            st.session_state.pop("market_results", None)
+            st.session_state.pop("market_analysis", None)
+            st.session_state.pop("market_context", None)
+            st.session_state.pop("market_analysis_error", None)
+            st.session_state.pop("public_web_check", None)
+            st.session_state.pop("public_web_check_error", None)
+            st.session_state.pop("auto_diag_completed_for_market_key", None)
+
+            ogq_api_key = _get_secret("OGQ_API_KEY")
+            base_url = _get_secret(
+                "OGQ_API_BASE_URL",
+                "https://4th-ai-ogq.competition.ogq.me",
+            )
+
+            if not ogq_api_key:
+                st.error("OGQ API 키가 설정되지 않았어요. Streamlit Secrets에 OGQ_API_KEY를 추가해주세요.")
+            else:
+                keywords = _keywords_from_user_input(feelings, user_tags, limit=5)
+                if not keywords:
+                    st.warning("시장 검색에 사용할 느낌이나 태그를 하나 이상 입력해주세요.")
+                else:
+                    try:
+                        with st.spinner("OGQ 마켓을 검색하고 있어요..."):
+                            market_results = search_by_keywords(
+                                ogq_api_key,
+                                keywords,
+                                max_keywords=5,
+                                per_keyword=8,
+                                max_results=12,
+                                max_detail_requests=8,
+                                base_url=base_url,
+                                user_id=None,
+                            )
+
+                        # 업로드 이미지와 OGQ 검색 결과의 강한 시각 일치 신호를 먼저 계산
+                        from market_analysis import annotate_visual_match_hints
+                        market_results = annotate_visual_match_hints(
+                            all_file_results[0]["bytes"], market_results
+                        )
+                        # 강한 일치 신호가 있는 항목을 앞쪽으로 우선 배치
+                        market_results.sort(
+                            key=lambda item: float(item.get("visual_match_score") or 0.0),
+                            reverse=True,
+                        )
+                        st.session_state["market_results"] = market_results
+
+                        if market_results:
+                            market_prompt = build_market_analysis_prompt(
+                                feelings,
+                                user_tags,
+                                market_results[:8],
+                            )
+
+                            gemini_key = _get_secret("GEMINI_API_KEY")
+                            if gemini_key:
+                                with st.spinner("OGQ 시장 결과를 실제 이미지와 비교 분석하고 있어요..."):
+                                    analysis, error_message = _generate_market_ai(
+                                        gemini_key,
+                                        market_prompt,
+                                        all_file_results[0]["bytes"],
+                                        all_file_results[0]["mime"],
+                                        market_results[:8],
+                                        max_output_tokens=1700,
+                                    )
+                                if analysis:
+                                    st.session_state["market_analysis"] = analysis
+
+                                    # 공개 웹 조사는 선택 사항으로 분리한다.
+                                    # 시장 비교 자체가 추가 Gemini 검색 호출 때문에 막히지 않도록 한다.
+                                    if public_web_enabled:
+                                        web_check = generate_public_web_check(
+                                            gemini_key,
+                                            feelings,
+                                            user_tags,
+                                        )
+                                        if web_check.get("text"):
+                                            st.session_state["public_web_check"] = web_check
+                                        elif web_check.get("error"):
+                                            st.session_state["public_web_check_error"] = web_check["error"]
+                                    else:
+                                        st.session_state["public_web_check"] = {}
+                                        st.session_state["public_web_check_error"] = "공개 웹 유사성 참고 조사는 선택하지 않아 실행하지 않았습니다. OGQ 시장 비교 분석에는 영향을 주지 않습니다."
+
+                                    # 이미지 진단에는 실제 시장 분석 + (실행했다면) 공개 웹 보조 조사 결과를 전달한다.
+                                    st.session_state["market_context"] = build_market_context_for_diagnosis(
+                                        analysis,
+                                        market_results[:8],
+                                        st.session_state.get("public_web_check", {}),
+                                    )
+                                if error_message:
+                                    st.session_state["market_analysis_error"] = error_message
+                            else:
+                                st.session_state["market_analysis_error"] = (
+                                    "Gemini API 키가 없어 시장 검색 결과만 표시합니다."
+                                )
+                        else:
+                            st.session_state["market_analysis_error"] = (
+                                "관련 OGQ 콘텐츠를 찾지 못했습니다. 다른 느낌이나 태그를 입력해 보세요."
+                            )
+
+                    except OGQAPIError as exc:
+                        st.error(f"OGQ 시장 검색에 실패했어요: {exc}")
+
+        # 시장 비교 완료 직후 자동 진단 옵션이 켜져 있으면 바로 AI 문제 표시까지 진행
+        if auto_diagnose_after_market and st.session_state.get("market_results") and st.session_state.get("market_context"):
+            if not st.session_state.get("auto_diag_completed_for_market_key"):
+                auto_key = hashlib.md5(st.session_state.get("market_context", "").encode("utf-8")).hexdigest()[:12]
+                gemini_key = _get_secret("GEMINI_API_KEY")
+                if gemini_key:
+                    with st.spinner("시장 비교가 끝났어요. 바로 AI가 문제 위치를 분석하고 있어요..."):
+                        _run_ai_diagnostics(
+                            all_file_results,
+                            selected_criteria,
+                            custom_rules,
+                            st.session_state.get("market_context", ""),
+                            gemini_key,
+                        )
+                    st.session_state["auto_diag_completed_for_market_key"] = auto_key
+                    st.success("시장 비교에 이어 AI 문제 표시까지 완료했어요.")
+                    _speak_completion("시장 비교와 AI 문제 진단이 모두 완료되었습니다.")
+
+        market_results = st.session_state.get("market_results", [])
+        if market_results:
+            st.subheader(f"관련 콘텐츠 {len(market_results)}개")
+            cols = st.columns(4)
+            for i, item in enumerate(market_results[:8]):
+                with cols[i % 4]:
+                    if item.get("main_image_url"):
+                        st.image(item["main_image_url"], use_container_width=True)
+                    st.caption(item.get("title", "제목 없음"))
+                    if item.get("description"):
+                        st.caption(item["description"][:90])
+                    if item.get("matched_keyword"):
+                        st.caption(f"검색어: {item['matched_keyword']}")
+                    tags = item.get("tags") or []
+                    if tags:
+                        st.caption("태그: " + ", ".join(f"#{tag}" for tag in tags[:6]))
+
+            market_analysis = st.session_state.get("market_analysis")
+            if isinstance(market_analysis, dict):
+                st.subheader("AI 시장 비교")
+
+                level = market_analysis.get("similarity_level", "보통")
+                level_emoji = {"높음": "🔴", "보통": "🟡", "낮음": "🟢"}.get(level, "🟡")
+                st.markdown(f"**시장 유사성: {level_emoji} {level}**")
+                if market_analysis.get("similarity_summary"):
+                    st.write(market_analysis["similarity_summary"])
+
+                comparisons = market_analysis.get("comparisons") or []
+                if comparisons:
+                    st.markdown("**시장 콘텐츠별 유사성**")
+                    for comp in comparisons:
+                        try:
+                            idx = int(comp.get("result_index", 0))
+                        except (TypeError, ValueError):
+                            continue
+                        if not (1 <= idx <= len(market_results[:8])):
+                            continue
+                        source = market_results[idx - 1]
+                        st.markdown(f"**[{idx}] {source.get('title', 'OGQ 콘텐츠')} — 유사성: {comp.get('similarity_level', '보통')}**")
+                        if comp.get("similarity_reason"):
+                            st.write(comp["similarity_reason"])
+                        if comp.get("same_points"):
+                            st.caption("같은 점: " + " · ".join(comp["same_points"]))
+                        if comp.get("different_points"):
+                            st.caption("다른 점: " + " · ".join(comp["different_points"]))
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**시장 전반의 공통 요소**")
+                    similarities = market_analysis.get("similarities") or []
+                    if similarities:
+                        for item in similarities:
+                            st.markdown(f"- {item}")
+                    else:
+                        st.caption("검색 결과에서 반복적으로 확인되는 공통 요소가 없습니다.")
+                with c2:
+                    st.markdown("**시장과의 차이점**")
+                    differences = market_analysis.get("differences") or []
+                    if differences:
+                        for item in differences:
+                            st.markdown(f"- {item}")
+                    else:
+                        st.caption("검색 데이터만으로 확인되는 뚜렷한 차이점이 없습니다.")
+
+                st.markdown("**시장과 비교했을 때의 장점**")
+                for item in (market_analysis.get("strengths") or []):
+                    st.markdown(f"- {item}")
+                if not market_analysis.get("strengths"):
+                    st.caption("검색 결과만으로 판단할 수 있는 장점을 찾지 못했습니다.")
+
+                st.markdown("**보완하면 좋은 점**")
+                for item in (market_analysis.get("gaps") or []):
+                    st.markdown(f"- {item}")
+                if not market_analysis.get("gaps"):
+                    st.caption("검색 결과만으로 확인되는 보완점이 없습니다.")
+
+                priority = market_analysis.get("priority_actions") or []
+                if priority:
+                    st.markdown("**먼저 확인할 것**")
+                    for idx, item in enumerate(priority, 1):
+                        st.markdown(f"{idx}. {item}")
+
+                evidence = market_analysis.get("evidence") or []
+                if evidence:
+                    with st.expander("시장 분석 근거 보기"):
+                        for item in evidence:
+                            idx = item.get("result_index")
+                            reason = item.get("reason", "")
+                            if idx and 1 <= int(idx) <= len(market_results[:8]):
+                                source = market_results[int(idx) - 1]
+                                st.markdown(
+                                    f"**[{idx}] {source.get('title', '콘텐츠')}** — {reason}"
+                                )
+
+            elif st.session_state.get("market_analysis"):
+                # 이전 버전의 문자열 결과가 세션에 남아도 화면이 깨지지 않도록 호환
+                st.subheader("AI 시장 비교")
+                st.markdown(str(st.session_state["market_analysis"]))
+
+            public_web = st.session_state.get("public_web_check")
+            if isinstance(public_web, dict) and public_web.get("text"):
+                st.markdown("**공개 웹 대중적 유사성 참고**")
+                st.caption("OGQ 마켓 밖의 공개 웹 자료를 보조적으로 확인한 결과입니다. 법적 표절·저작권 판단이 아닙니다.")
+                st.markdown(public_web["text"])
+                sources = public_web.get("sources") or []
+                if sources:
+                    with st.expander("웹 검색 근거 보기"):
+                        for source in sources:
+                            title = source.get("title") or source.get("uri")
+                            uri = source.get("uri") or ""
+                            st.markdown(f"- [{title}]({uri})")
+            if st.session_state.get("public_web_check_error"):
+                st.caption(st.session_state["public_web_check_error"])
+
+            if st.session_state.get("market_analysis_error"):
+                st.warning(st.session_state["market_analysis_error"])
+
+        # ---------- 4단계: AI 진단 + 위치 표시 ----------
+        st.divider()
+        st.markdown('<div class="section-kicker">STEP 4 · AI DIAGNOSIS</div>', unsafe_allow_html=True)
+        st.header("AI 문제 위치 표시")
+        st.caption("선택한 검사 영역과 시장 비교 자료를 바탕으로 문제 영역을 표시하고, 무엇을/왜/어떻게 고칠지 설명합니다.")
+
+        market_context = st.session_state.get("market_context", "")
+
+        if st.button(f"🧠 업로드한 {len(files)}개 전체 AI 진단 받기", type="primary"):
+            gemini_key = _get_secret("GEMINI_API_KEY")
+            if not gemini_key:
+                st.error("Gemini API 키가 설정되지 않았어요. Streamlit Secrets에 GEMINI_API_KEY를 추가해주세요.")
+            else:
+                completed = _run_ai_diagnostics(
+                    all_file_results,
+                    selected_criteria,
+                    custom_rules,
+                    market_context,
+                    gemini_key,
+                )
+                if completed:
+                    st.success("전체 AI 진단이 끝났어요.")
+                else:
+                    st.warning("AI 진단이 완료되지 않은 파일이 있습니다. 잠시 후 다시 시도해 주세요.")
+                _speak_completion()
+
+
+        # 결과 렌더링
+        diagnosis_texts: dict[str, str] = {}
+        for file_result in all_file_results:
+            digest = hashlib.sha256(file_result["bytes"]).hexdigest()[:16]
+            cache_prefix = f"diag_v5_{file_result['name']}_{digest}_"
+            matched_keys = [
+                key
+                for key in st.session_state.keys()
+                if isinstance(key, str) and key.startswith(cache_prefix)
+            ]
+            if not matched_keys:
+                continue
+
+            diagnosis = st.session_state[matched_keys[-1]]
+            diagnosis_texts[file_result["name"]] = render_diagnosis_markdown(diagnosis)
+
+            with st.expander(
+                f"🧠 AI 진단 — {file_result['name']}",
+                expanded=True,
+            ):
+                st.markdown(diagnosis_texts[file_result["name"]])
+
+                if diagnosis.get("diagnosis_error"):
+                    st.warning("⚠️ 이번 AI 진단 요청에서 일시적인 오류가 발생했습니다. 아래 진단 결과와 시장 자료가 있다면 계속 참고할 수 있습니다.")
+
+                if custom_rules:
+                    custom_results = diagnosis.get("custom_criteria_results") or []
+                    st.subheader("나만의 검사 기준 결과")
+                    returned = {str(item.get("criterion", "")).strip() for item in custom_results if isinstance(item, dict)}
+                    st.success(f"사용자 지정 기준 {len(custom_rules)}개가 이번 AI 요청에 포함됐고, {len(returned)}/{len(custom_rules)}개 개별 평가가 반환되었습니다.")
+                    status_icon = {"양호": "🟢", "주의": "🟡", "개선 필요": "🔴", "판단 어려움": "⚪"}
+                    for rule in custom_rules:
+                        item = next((x for x in custom_results if isinstance(x, dict) and str(x.get("criterion", "")).strip() == rule), None)
+                        if not item:
+                            item = {"status": "판단 어려움", "result": "개별 평가가 반환되지 않았습니다.", "evidence": "응답 누락"}
+                        st.markdown(f"**{status_icon.get(item.get('status'), '⚪')} {rule} · {item.get('status', '판단 어려움')}**")
+                        st.write(item.get("result", ""))
+                        if item.get("evidence"):
+                            st.caption(f"근거: {item['evidence']}")
+
+                findings = diagnosis.get("findings", [])
+                if findings:
+                    st.subheader("문제 위치")
+                    annotated = _draw_annotations(file_result["bytes"], findings)
+                    st.image(
+                        annotated,
+                        caption="🔴 AI가 문제 위치로 판단한 영역 — 참고용 시각화",
+                        use_container_width=True,
+                    )
+
+                    for idx, finding in enumerate(findings, 1):
+                        severity_label = {
+                            "high": "🔴 높음",
+                            "medium": "🟡 중간",
+                            "low": "🟢 낮음",
+                        }.get(finding.get("severity"), "검토")
+                        st.markdown(
+                            f"**{idx}. {severity_label} · {finding.get('area', '검토 항목')}**\n\n"
+                            f"- **어디가:** {finding.get('what', '')}\n"
+                            f"- **왜:** {finding.get('why', '')}\n"
+                            f"- **어떻게:** {finding.get('how', '')}"
+                        )
+                else:
+                    st.info("이미지에서 위치를 특정할 수 있는 개선 항목이 없습니다.")
+
+        # ---------- 5단계: 기존 셀프 체크리스트 ----------
+        st.divider()
+        st.markdown('<div class="section-kicker">STEP 5 · SELF CHECK</div>', unsafe_allow_html=True)
+        st.header("규정 위반 셀프 체크리스트")
+        st.caption("이미지만으로 확정하기 어려운 항목은 직접 확인해 주세요.")
+
+        checklist_items = {
+            "저작권 있는 폰트를 상업적으로 이용 가능한 라이선스로만 사용했다": "font_license",
+            "생성형 AI 사용 여부와 관련 규정을 확인했다": "ai_rule_check",
+            "다른 판매자의 기존 콘텐츠와 차별화되는 요소가 있다": "no_duplicate",
+            "텍스트가 잘리지 않고 세이프존 안에 들어와 있다": "text_safezone",
+            "욕설·폭력·선정성·정치/종교 관련 부적합 요소가 없다": "no_sensitive_content",
+        }
+        checklist_status = {}
+        for label, key in checklist_items.items():
+            checklist_status[label] = st.checkbox(label, key=f"chk_{key}")
+
+        checklist_done = sum(1 for value in checklist_status.values() if value)
+        checklist_total = len(checklist_items)
+        st.caption(f"체크리스트 {checklist_done}/{checklist_total} 완료")
+
+        # ---------- 6단계: 점수 + Todo ----------
+        st.divider()
+        st.markdown('<div class="section-kicker">STEP 6 · PRIORITY</div>', unsafe_allow_html=True)
+        st.header("준비도 & 개선 우선순위")
+        score = compute_score(
+            all_file_results,
+            checklist_done,
+            checklist_total,
+        )
+        st.markdown(
+            f"""
+            <div class="score-card">
+                <div>OGQ 준비도 점수</div>
+                <div class="score-num">{score:.0f}점 <span style="font-size:1rem; font-weight:400;">/ 100점</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        todo_list = build_priority_todo(all_file_results)
+        if todo_list:
+            st.subheader("이것부터 고치세요")
+            for i, todo in enumerate(todo_list, start=1):
+                grade_label = "❌ 실패" if todo["grade"] == "fail" else "⚠️ 주의"
+                css_class = "fail" if todo["grade"] == "fail" else "warn"
+                st.markdown(
+                    f"""
+                    <div class="todo-row {css_class}">
+                        <b>{i}. {grade_label} · {todo['item']}</b><br/>
+                        {todo['msg']}<br/>
+                        <small>영향받은 파일 {todo['affected_count']}개: {', '.join(todo['affected_files'][:5])}
+                        {' 외' if len(todo['affected_files']) > 5 else ''}</small>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.success("자동 검사 기준으로 고칠 항목이 없어요!")
+
+        # ---------- 7단계: PDF + 히스토리 ----------
+        st.divider()
+        st.markdown('<div class="section-kicker">STEP 7 · REPORT</div>', unsafe_allow_html=True)
+        st.header("리포트 내보내기 & 재검사 히스토리")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("📄 PDF 리포트 생성"):
+                pdf_bytes = build_pdf_report(
+                    all_file_results,
+                    todo_list,
+                    score,
+                    checklist_status,
+                    diagnosis_texts,
+                )
+                st.download_button(
+                    "⬇️ PDF 다운로드",
+                    data=pdf_bytes,
+                    file_name="ogq_sticker_doctor_report.pdf",
+                    mime="application/pdf",
+                )
+
+        with col_b:
+            st.caption("저장하면 점수뿐 아니라 시장 비교, AI 문제 위치 표시, 적용된 검사 기준, 사용자 지정 기준 결과까지 함께 보관됩니다.")
+            if st.button("💾 이번 결과를 히스토리에 저장"):
+                pass_count = sum(
+                    1
+                    for fr in all_file_results
+                    for grade, _, _ in fr["results"]
+                    if grade == "pass"
+                )
+                warn_count = sum(
+                    1
+                    for fr in all_file_results
+                    for grade, _, _ in fr["results"]
+                    if grade == "warn"
+                )
+                fail_count = sum(
+                    1
+                    for fr in all_file_results
+                    for grade, _, _ in fr["results"]
+                    if grade == "fail"
+                )
+                record_id = save_diagnosis_record(
+                    current_user,
+                    score=score,
+                    pass_count=pass_count,
+                    warn_count=warn_count,
+                    fail_count=fail_count,
+                    checklist_done=checklist_done,
+                    checklist_total=checklist_total,
+                    file_count=len(all_file_results),
+                    market_keywords=_keywords_from_user_input(feelings, user_tags, limit=5),
+                    diagnosis_payload=_build_history_payload(
+                        all_file_results,
+                        selected_criteria,
+                        custom_rules,
+                        feelings,
+                        user_tags,
+                    ),
+                )
+                if record_id:
+                    st.success("내 계정의 진단 히스토리에 저장했어요. 상단의 '내 진단 히스토리'에서 언제든지 다시 볼 수 있습니다.")
+                    st.rerun()
+                else:
+                    st.error("사용자 기록 저장에 실패했습니다.")
+
+        # ---------- 제출 구성 요약 ----------
+        st.divider()
+        st.subheader("제출 구성 체크")
+        st.caption("OGQ 공개 제작 가이드: 메인 1개 · 스티커 24개 · 탭 1개")
+        need = {"메인 이미지": 1, "스티커 이미지": 24, "탭 이미지": 1}
+        for name, required in need.items():
+            have = type_counts[name]
+            st.write(f"**{name}**  {have} / {required}")
+            st.progress(min(have / required, 1.0))
+    else:
+        st.info("이미지를 올리면 OGQ 심사 기준에 맞는지 바로 검사합니다.")
